@@ -24,7 +24,7 @@ def sigmoid(h_init: np.ndarray) -> np.ndarray:
     return result
 
 
-def hyperbolic_tangen(h_init: np.ndarray) -> np.ndarray:
+def hyperbolic_tanh(h_init: np.ndarray) -> np.ndarray:
     exponent = (1 + np.exp(-h_init))
     result = np.divide((1 - exponent), (1 + exponent))
     return result

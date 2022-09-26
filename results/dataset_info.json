@@ -1,0 +1,17 @@
+{
+    "all_data": {
+        "phishing": 414,
+        "non_phishing": 66,
+        "total_data": 480
+    },
+    "train_data": {
+        "phishing": 331,
+        "non_phishing": 53,
+        "total": 384
+    },
+    "test_data": {
+        "phishing": 83,
+        "non_phishing": 13,
+        "total": 96
+    }
+}

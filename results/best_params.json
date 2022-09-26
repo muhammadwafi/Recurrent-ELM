@@ -1,0 +1,17 @@
+{
+    "ELM": {
+        "activation": "sigmoid",
+        "hidden_node": 2,
+        "mean_acc": 0.8619958988380041
+    },
+    "NaiveBayes": {
+        "mean_acc": 0.9139781271360219,
+        "var_smoothing": 1e-08
+    },
+    "RecurrentELM": {
+        "activation": "sigmoid",
+        "context_neurons": 2,
+        "hidden_node": 8,
+        "mean_acc": 0.9974025974025974
+    }
+}

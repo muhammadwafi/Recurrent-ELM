@@ -19,3 +19,10 @@ Urutan data = t
 𝛿2,1 = 𝑇 (2 − (3 + 1) + 3)
 𝛿2,1 = 𝑇(1) = 0,341667
 ```
+
+
+
+- Add basic ELM
+- Save TFIDF result
+- KFold
+- Confusion Matrix

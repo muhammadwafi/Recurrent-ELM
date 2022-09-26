@@ -1,70 +1,99 @@
-#!/usr/bin/env python3
-# -*- coding:utf-8 -*-
-###
-# src » preprocessing.py
-# ==============================================
-# @Author    : Muhammad Wafi <mwafi@mwprolabs.com>
-# @Support   : [https://mwprolabs.com]
-# @Created   : 04-07-2022
-# @Modified  : 04-07-2022 12:47:10 pm
-# ----------------------------------------------
-# @Copyright (c) 2022 MWprolabs https://mwprolabs.com
-#
-###
-
 import os
 import re
 import email
 import glob
 import collections
+from timeit import default_timer as timer
+from datetime import timedelta
 from nltk.corpus import stopwords
 from nltk.stem.porter import PorterStemmer
-from bs4 import BeautifulSoup
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
+from bs4 import BeautifulSoup
 import pandas as pd
-from tfidf import TfIdf
 import config
+
+_tuple_name = [
+    "cleaned",
+    "tokenized",
+    "stopwords",
+    "stemmed"
+]
+_Record = collections.namedtuple("_Record", _tuple_name)
 
 
 class Preprocessing:
     """Sets of preprocessing functions"""
 
-    def __init__(self, phishing_path, non_phishing_path):
+    def __init__(
+        self,
+        phishing_path,
+        non_phishing_path,
+        replace_existing=False,
+        limit_data=None,
+        use_pca=True,
+        n_components=10,
+        random_state=42,
+        ngram_range=(1, 1),
+    ):
         self.phishing_path = phishing_path
         self.non_phishing_path = non_phishing_path
-        self.tfidf_vect = TfidfVectorizer(
-            min_df=1,
-            sublinear_tf=False,
-            ngram_range=(1, 1),
-            smooth_idf=False,
-            norm=None
-        )
         self.porter_stemmer = PorterStemmer()
         self.clean_regex = re.compile("[^a-zA-Z]")
+        self.replace_existing = replace_existing
+        self.limit_data = limit_data
+        self.filenames = []
+        self.stopwords = stopwords.words("english")
+        self.n_components = n_components
+        self.use_pca = use_pca
+        self.tfidf_vect = TfidfVectorizer(
+            min_df=1,
+            ngram_range=ngram_range,
+        )
+        self.pca_obj = PCA(
+            n_components=n_components,
+            random_state=random_state,
+            # svd_solver="arpack",
+        )
 
-    def case_folding(self, item):
-        return item.lower()
+    def cleaning(self, words):
+        url_rgx = r"((http://[^\s]+)|(https://[^\s]+)|(pic.[^\s]+))"
 
-    def cleaning(self, item):
-        return re.sub(self.clean_regex, " ", item)
+        # remove html tags
+        words = BeautifulSoup(words, "html.parser").get_text()
+        # Case folding
+        words = words.lower()
+        # remove new line
+        words = re.sub("=\n", "", words)
+        words = re.sub("[\n]", " ", words)
+        # remove urls
+        words = re.sub(url_rgx, "", words)
+        # remove numbers
+        words = re.sub(r"(\s|^)?[0-9]+(\s|$)?", " ", words)
+        # remove punctutation marks
+        words = re.sub(r"e-mail", "email", words)
+        words = re.sub(r"[IMAGE]", "", words)
+        words = re.sub(r"[^\w\s]", " ", words)
+        # remove spaces
+        words = re.sub(r"[\s]+", " ", words)
+        # remove double characters if > 2
+        words = re.compile(r"(.)\1{2,}").sub(r"\1\1", words)
+        words = re.sub("[^a-zA-Z]", " ", words)
+        return words.strip()
 
-    def stopwords_and_stemming(self, item):
-        data_arr = item.split()
-        result = list()
-        for word in data_arr:
-            temp = word
-            if len(temp) == 2:
-                temp = self.remove_duplicate(word)
-            if temp not in stopwords.words("english") and len(temp) > 1:
-                result.append(self.porter_stemmer.stem(temp))
-        return result
+    def tokenizer(self, cleaned_dt):
+        # cleaned = self.cleaning(words)
+        return cleaned_dt.split()
 
-    def remove_duplicate(self, str):
-        return "".join(set(str))
+    def stopwords_removal(self, token_dt):
+        return [
+            word for word in token_dt if word not in self.stopwords
+        ]
 
-    def remove_html_tag(self, item):
-        return BeautifulSoup(item, "lxml").text
+    def stemming(self, stopwords_dt):
+        return [
+            self.porter_stemmer.stem(word) for word in stopwords_dt
+        ]
 
     def get_file_names(self, path, filetype=None):
         if filetype:
@@ -73,125 +102,261 @@ class Preprocessing:
             path += "/*"
 
         file_list = glob.glob(path)
-        # print(file_list)
-        return file_list[:10]
-
-    def open_email(self, paths):
-        emails = list()
-        for path in paths:
-            print("opening", path)
-            message = email.message_from_file(open(path, encoding="cp1252"))
-            payload = message.get_payload()
-            body = self.get_body_email(payload)
-            emails.append(body)
-        return emails
+        return file_list[:self.limit_data]
 
     def get_body_email(self, data):
         if type(data) == str:
             return data
         return self.get_body_email(data[0].get_payload())
 
-    def get_fitur(self, datas):
-        fitur = []
-        for data in datas:
-            fitur += data
-        return list(set(fitur))
+    def open_email(self, paths):
+        emails = []
+        self.filenames = []
+        for path in paths:
+            self.filenames.append(os.path.basename(path))
+            try:
+                message = email.message_from_file(
+                    open(path, encoding="cp1252", errors="ignore"))
+                payload = message.get_payload()
+                body = self.get_body_email(payload)
+                emails.append(body)
+            except IOError:
+                emails.append("")
+        return emails
 
-    def _get_cleaned_data(self, data_path, data_type):
+    def extract_tfidf(self, dataset) -> tuple:
+        # transform features to sparse matrix
+        tfidf = self.tfidf_vect.fit_transform(dataset)
+        # get all feature names
+        feature_names = self.tfidf_vect.get_feature_names_out()
+        return tfidf, feature_names
+
+    def extract_pca(self, dataset):
+        tfidf = self.tfidf_vect.fit_transform(dataset)
+        svd = TruncatedSVD(n_components=self.n_components, random_state=42)
+        result = svd.fit_transform(tfidf)
+        return result
+
+    def convert_to_dataframe(self, data, labels):
+        cleaned_df = pd.DataFrame({
+            "filenames": self.filenames,
+            "data": data.cleaned,
+            "labels": labels,
+        })
+
+        tokenized_df = pd.DataFrame({
+            "filenames": self.filenames,
+            "data": data.tokenized,
+            "labels": labels,
+        })
+
+        stopword_df = pd.DataFrame({
+            "filenames": self.filenames,
+            "data": data.stopwords,
+            "labels": labels,
+        })
+
+        stemmed_df = pd.DataFrame({
+            "filenames": self.filenames,
+            "data": data.stemmed,
+            "labels": labels,
+        })
+
+        return _Record(
+            cleaned_df, tokenized_df, stopword_df, stemmed_df
+        )
+
+    def get_data(self, data_path, data_type):
         file_list = self.get_file_names(data_path, None)
-        if data_type == "phising":
+        labels_code = config.LABEL_ENCODER["non_phishing"]
+        if data_type == "phishing":
+            labels_code = config.LABEL_ENCODER["phishing"]
             file_list = self.get_file_names(data_path, "eml")
 
         mail_dt = self.open_email(file_list)
+        total_file = len(file_list)
+        counter = 0
+
         cleaned_dt = []
+        tokenized_dt = []
+        stopword_dt = []
+        stemmed_dt = []
 
-        for mail_body in mail_dt:
-            cleaned_html = self.remove_html_tag(mail_body)
-            case_folded = self.case_folding(cleaned_html)
-            cleaned = self.cleaning(case_folded)
-            stopword_removed_and_stemmed = self.stopwords_and_stemming(cleaned)
-            cleaned_dt.append(stopword_removed_and_stemmed)
+        for mail_body, path in zip(mail_dt, file_list):
+            fname = os.path.basename(path)
+            counter += 1
+            info = f"{counter}/{total_file}"
+            # progress = (complete / total_file) * 100
 
-        return cleaned_dt
+            print(f"Processing file {fname}", end="\r", flush=True)
+            print(f"   [+] Cleaning file {fname}", end="\r", flush=True)
+            cleaned_words = self.cleaning(mail_body)
+            cleaned_dt.append(cleaned_words)
 
-    def get_tf_idf(self, dataset):
-        fitur = self.get_fitur(dataset)
-        tfidf_obj = TfIdf(dataset, fitur).getTfIdf()
-        # ----- NEW ------
-        # word_vectorizer = self.tfidf_vect
-        # word_vectorizer.fit(fitur)
-        # dt = word_vectorizer.transform(fitur)
+            print(f"   [+] Tokenizing file {fname}", end="\r", flush=True)
+            tokenized_words = self.tokenizer(cleaned_words)
+            tokenized_dt.append(tokenized_words)
 
-        return tfidf_obj
+            print(f"   [+] Stopwords removal {fname}", end="\r", flush=True)
+            stopwords_removed = self.stopwords_removal(tokenized_words)
+            stopword_dt.append(stopwords_removed)
 
-    def get_pca(self, dataset):
-        tfidf = self.get_tf_idf(dataset)
-        pca_obj = PCA(n_components=10, random_state=42)
-        # pca_obj = TruncatedSVD(n_components=10, random_state=42)
-        pca_obj.fit(tfidf)
+            print(f"   [+] Stemming file {fname}", end="\r", flush=True)
+            stemmed_words = self.stemming(stopwords_removed)
+            stemmed_dt.append(stemmed_words)
 
-        return pca_obj.transform(tfidf)
+            print(f"[ OK ] Process complete for -> {path} \t [{info}]")
 
-    def get_phishing_df(self):
-        cleaned_phising_dt = self._get_cleaned_data(
-            self.phishing_path, "phising")
-        p_pca_dt = self.get_pca(cleaned_phising_dt)
-        cols = [f"X{i+1}" for i in range(len(p_pca_dt[0]))]
+        print(64*"-")
 
-        # Create dataframe
-        p_df = pd.DataFrame(data=p_pca_dt, columns=cols)
-        # append labels
-        p_df["labels"] = [1 for _ in range(len(p_pca_dt))]
+        total = range(len(mail_dt))
+        labels = [labels_code for _ in total]
 
-        return p_df
+        return self.convert_to_dataframe(
+            data=_Record(
+                cleaned_dt, tokenized_dt, stopword_dt, stemmed_dt
+            ),
+            labels=labels
+        )
 
-    def get_non_phishing_df(self):
-        cleaned_non_phising_dt = self._get_cleaned_data(
-            self.non_phishing_path, "non_phishing")
-        n_pca_dt = self.get_pca(cleaned_non_phising_dt)
-        cols = [f"X{i+1}" for i in range(len(n_pca_dt[0]))]
+    def get_joined_dataframe(self):
+        phishing = self.get_data(self.phishing_path, "phishing")
+        non_phishing = self.get_data(self.non_phishing_path, "non_phishing")
 
-        # Create dataframe
-        n_df = pd.DataFrame(data=n_pca_dt, columns=cols)
-        # append labels
-        n_df["labels"] = [2 for _ in range(len(n_pca_dt))]
-        return n_df
+        # Remove index data of pandas
+        # default indexes and join them
 
-    def generate_data(self):
-        # If file not exists, create it
-        phising_df = self.get_phishing_df()
-        non_phishing_df = self.get_non_phishing_df()
+        # remove `cleaned` index
+        phishing.cleaned.reset_index(drop=True, inplace=True)
+        non_phishing.cleaned.reset_index(drop=True, inplace=True)
+        cleaned_df = pd.concat(
+            [phishing.cleaned, non_phishing.cleaned],
+            ignore_index=True
+        )
+        # remove `tokenized` index
+        phishing.tokenized.reset_index(drop=True, inplace=True)
+        non_phishing.tokenized.reset_index(drop=True, inplace=True)
+        tokenized_df = pd.concat(
+            [phishing.tokenized, non_phishing.tokenized],
+            ignore_index=True
+        )
+        # remove `stopword` index
+        phishing.stopwords.reset_index(drop=True, inplace=True)
+        non_phishing.stopwords.reset_index(drop=True, inplace=True)
+        stopword_df = pd.concat(
+            [phishing.stopwords, non_phishing.stopwords],
+            ignore_index=True
+        )
+        # remove `stemmed` index
+        phishing.stemmed.reset_index(drop=True, inplace=True)
+        non_phishing.stemmed.reset_index(drop=True, inplace=True)
+        stemmed_df = pd.concat(
+            [phishing.stemmed, non_phishing.stemmed],
+            ignore_index=True
+        )
 
-        # combine to one df
-        df = pd.concat([phising_df, non_phishing_df], ignore_index=True)
+        return {
+            "cleaned": cleaned_df,
+            "tokenized": tokenized_df,
+            "stopword": stopword_df,
+            "stemmed": stemmed_df,
+        }
 
-        return df
+    def get_or_save(self):
+        path_list = {
+            "cleaned": config.CLEANED_SAVE_PATH,
+            "tokenized": config.TOKENIZED_SAVE_PATH,
+            "stopword": config.STOPWORD_SAVE_PATH,
+            "stemmed": config.STEMMED_SAVE_PATH
+        }
 
-    def get_data(self, path=None):
-        # check if file exists
-        if os.path.exists(path):
-            return True, pd.read_excel(path)
-        # if not exist, generate data
-        return False, self.generate_data()
+        # start = timer()
 
-    def run(self, save_file_path=None, replace_existing=True):
-        path = save_file_path
-        if not path:
-            path = config.SAVE_PREP_PATH
+        if self.replace_existing:
+            data = self.get_joined_dataframe()
 
-        is_existing_data, data = self.get_data(path)
+            for name, path in path_list.items():
+                self.save(path, data.get(name))
 
-        # If data not exist yet or
-        # replace_existing option is True,
-        # then export data to excel
-        if not is_existing_data or replace_existing:
-            try:
-                data.to_excel(path)
-                print("[INFO] Preprocessed data has been saved successfully")
-            except IOError:
-                print("[ERROR] Cannot save data to excel!")
+        for name, path in path_list.items():
+            if not os.path.exists(path):
+                self.save(path, data.get(name))
 
-        if is_existing_data:
-            print("[INFO] Using existing data...")
+        # end = timer()
+        # elapsed_time = timedelta(seconds=end-start)
 
-        return data
+        # if self.replace_existing:
+        #     print(64*"-")
+        #     print(f"[DONE] Preprocessing data completed in {elapsed_time}s")
+        #     print(64*"-")
+        #     print()
+
+        return pd.read_excel(path_list["stemmed"])
+
+    def get_or_save_tfidf(self, stemmed_df, skip_cols=None):
+        if self.replace_existing or not os.path.exists(config.TFIDF_SAVE_PATH):
+            print("[INFO] Getting TF-IDF features...", end="\r", flush=True)
+
+            tfidf, feature_names = self.extract_tfidf(stemmed_df["data"])
+            # convert to dataframe
+            df_tfidf = pd.DataFrame(
+                tfidf.todense(),
+                columns=[
+                    f"X{i+1} ({feature_names[i]})"
+                    for i in range(len(feature_names))
+                ]
+            )
+            # append labels
+            df_tfidf.insert(0, "filenames", stemmed_df["filenames"])
+            df_tfidf["labels"] = stemmed_df["labels"]
+            # export data to excel
+            self.save(config.TFIDF_SAVE_PATH, df_tfidf)
+
+        if skip_cols:
+            return pd.read_excel(
+                config.TFIDF_SAVE_PATH,
+                usecols=lambda x: x not in skip_cols
+            )
+
+        return pd.read_excel(config.TFIDF_SAVE_PATH)
+
+    def get_or_save_pca(self, stemmed_df):
+        if self.replace_existing or not os.path.exists(config.PCA_SAVE_PATH):
+            print("[INFO] Getting PCA features...", end="\r", flush=True)
+            pca = self.extract_pca(stemmed_df["data"])
+            df_pca = pd.DataFrame(
+                pca,
+                columns=[f"X{i+1}" for i in range(len(pca[0]))]
+            )
+            df_pca.insert(0, "filenames", stemmed_df["filenames"])
+            df_pca["labels"] = stemmed_df["labels"]
+            print("[ DONE ]")
+            # export data to excel
+            self.save(config.PCA_SAVE_PATH, df_pca)
+
+        return pd.read_excel(config.PCA_SAVE_PATH)
+
+    def save(self, path, data):
+        print(f"[INFO] Saving data into -> {path}", end=" \t")
+        try:
+            data.to_excel(path, index_label="No")
+            print("[ DONE ]")
+        except IOError:
+            print("[ ERROR ]")
+
+        return data, path
+
+    def run(self):
+        path = config.TFIDF_SAVE_PATH
+        if self.use_pca:
+            path = config.PCA_SAVE_PATH
+
+        if not self.replace_existing:
+            print(f"[INFO] Load existing data from -> {path}\n")
+
+        stemmed_df = self.get_or_save()
+
+        if self.use_pca:
+            return self.get_or_save_pca(stemmed_df)
+
+        return self.get_or_save_tfidf(stemmed_df)
